@@ -10,7 +10,12 @@ tags:
 
 *Part 5 of 7: Multi-Layer Data Pipeline Architecture*
 
-> **Note**: This series uses a hypothetical Facebook analytics platform as an example to illustrate the architecture patterns. All code examples are for educational purposes only.
+> **Educational Note**: This blog series explores architectural patterns for building large-scale data extraction systems. We use a Facebook analytics platform as our example scenario throughout the series. The patterns and code examples are designed for educational purposes and apply broadly to any multi-tenant API integration system.
+
+---
+
+## Series Navigation
+[← Part 4: Processing & Transformation](./part-4.md) | [Part 6: Dual HTTP/WebSocket Strategy →](./part-6.md)
 
 ---
 
@@ -25,11 +30,74 @@ Checkpoints are more than just "saving progress." They're the foundation that tr
 ### Core Checkpoint Philosophy
 
 ```csharp
+// Real checkpoint patterns from production TransactionsCheckpoint.cs and ChatHistoryCheckpoint.cs
 public interface ICheckpointable
 {
     Task<Checkpoint> CreateCheckpointAsync();
     Task RestoreFromCheckpointAsync(Checkpoint checkpoint);
     Task<bool> IsProcessingCompleteAsync(Checkpoint checkpoint);
+}
+
+// Real entity structure from TransactionsCheckpoint.cs
+public class TransactionCheckpoint
+{
+    public long UserId { get; set; }
+    public long FanId { get; set; }
+    public string TransactionId { get; set; } = string.Empty!;
+    public DateTimeOffset TransactionDate { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset ModifiedAt { get; set; }
+
+    // Composite primary key: UserId, FanId, TransactionId
+}
+
+// Real entity structure from ChatHistoryCheckpoint.cs
+public class ChatHistoryCheckpoint
+{
+    public long MessageId { get; set; } // Primary key
+    public long UserId { get; set; }
+    public long? FanId { get; set; } // Nullable for system messages
+    public long FromId { get; set; }
+    public DateTimeOffset MessageCreatedAt { get; set; }
+    public DateTimeOffset MessageChangedAt { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset ModifiedAt { get; set; }
+}
+
+// Real entity structure from FanCheckpoint.cs
+public class FanCheckpoint
+{
+    public long UserId { get; set; }
+    public long FanId { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset? LastSeen { get; set; } // Nullable for tracking
+    public string LatestBlobUrl { get; set; } = string.Empty!;
+    public string LatestHash { get; set; } = string.Empty!; // Content hash for change detection
+    public DateTimeOffset ModifiedAt { get; set; }
+    public string ProducedBy { get; set; } = string.Empty!; // Process tracking
+
+    // Composite primary key: UserId, FanId
+}
+
+// Real configuration from TransactionsCheckpointConfiguration.cs
+public class TransactionsCheckpointConfiguration : IEntityTypeConfiguration<TransactionCheckpoint>
+{
+    public void Configure(EntityTypeBuilder<TransactionCheckpoint> builder)
+    {
+        builder.ToTable("TransactionsCheckpoints");
+
+        // Real composite key pattern
+        builder.HasKey(e => new { e.UserId, e.FanId, e.TransactionId });
+
+        // Real indexes for performance
+        builder.HasIndex(e => e.UserId);
+        builder.HasIndex(e => e.FanId);
+        builder.HasIndex(e => e.TransactionId);
+        builder.HasIndex(e => e.TransactionDate);
+
+        builder.Property(e => e.CreatedAt).IsRequired();
+        builder.Property(e => e.ModifiedAt).IsRequired();
+    }
 }
 
 public sealed record Checkpoint(
@@ -52,46 +120,92 @@ public sealed record Checkpoint(
 Different operations need different checkpoint granularities:
 
 ```csharp
+// Real checkpoint manager using actual entities from production
 public class FacebookDataCheckpointManager
 {
-    // Coarse-grained: Per-user processing state
-    public async Task<UserProcessingCheckpoint> GetUserCheckpointAsync(long facebookUserId)
+    private readonly OfdiMinerDbContext _dbContext; // Real DbContext from production
+    private readonly IFusionCache _fusionCache;
+
+    // Coarse-grained: Per-user processing state using FanCheckpoint
+    public async Task<FanCheckpoint?> GetUserCheckpointAsync(long facebookUserId, long fanId)
     {
-        return await dbContext.UserProcessingCheckpoints
-            .FirstOrDefaultAsync(x => x.UserId == facebookUserId);
+        return await _dbContext.FanCheckpoints
+            .FirstOrDefaultAsync(x => x.UserId == facebookUserId && x.FanId == fanId);
     }
 
-    // Medium-grained: Per-data-type processing state
-    public async Task<DataTypeCheckpoint> GetDataTypeCheckpointAsync(long facebookUserId, string dataType)
+    // Medium-grained: Per-data-type processing state using different checkpoint entities
+    public async Task<List<TransactionCheckpoint>> GetTransactionCheckpointsAsync(long facebookUserId)
     {
-        return await dbContext.DataTypeCheckpoints
-            .FirstOrDefaultAsync(x => x.UserId == facebookUserId && x.DataType == dataType);
+        return await _dbContext.TransactionCheckpoints
+            .Where(x => x.UserId == facebookUserId)
+            .OrderByDescending(x => x.TransactionDate)
+            .ToListAsync();
     }
 
-    // Fine-grained: Per-item processing state
-    public async Task<bool> IsItemProcessedAsync(long facebookUserId, string itemId, string dataType)
+    // Fine-grained: Per-item processing state with dual-layer caching
+    public async Task<bool> IsTransactionProcessedAsync(long facebookUserId, long fanId, string transactionId)
     {
-        var cacheKey = $"checkpoint:{dataType}:user_{facebookUserId}:item_{itemId}";
+        // Real Redis key pattern from ChatHistoryMiningProcessor.cs
+        var cacheKey = $"transaction_checkpoints:{facebookUserId}:{fanId}:{transactionId}";
 
-        // Check Redis first (fast path)
-        var cacheResult = await fusionCache.TryGetAsync<bool>(cacheKey);
+        // Check Redis first (fast path - sub-millisecond)
+        var cacheResult = await _fusionCache.TryGetAsync<bool>(cacheKey);
         if (cacheResult.HasValue)
             return cacheResult.Value;
 
-        // Check database (persistent path)
-        var exists = await dbContext.ItemCheckpoints
+        // Check database (persistent path - real entity structure)
+        var exists = await _dbContext.TransactionCheckpoints
             .AnyAsync(x => x.UserId == facebookUserId &&
-                          x.ItemId == itemId &&
-                          x.DataType == dataType);
+                          x.FanId == fanId &&
+                          x.TransactionId == transactionId);
 
-        // Cache the result
-        await fusionCache.SetAsync(cacheKey, exists, TimeSpan.FromHours(24));
+        // Cache the result with intelligent TTL (real pattern from production)
+        await _fusionCache.SetAsync(cacheKey, exists, TimeSpan.FromHours(6));
         return exists;
     }
-}
-```
 
-## Content-Based Change Detection
+    // Real chat message checkpoint check
+    public async Task<bool> IsChatMessageProcessedAsync(long messageId)
+    {
+        var cacheKey = $"chats_checkpoints:{messageId}"; // Real key from ChatHistoryMiningProcessor
+
+        var cacheResult = await _fusionCache.TryGetAsync<bool>(cacheKey);
+        if (cacheResult.HasValue)
+            return cacheResult.Value;
+
+        var exists = await _dbContext.ChatHistoryCheckpoints
+            .AnyAsync(x => x.MessageId == messageId);
+
+        await _fusionCache.SetAsync(cacheKey, exists, TimeSpan.FromHours(24));
+        return exists;
+    }
+
+    // Real checkpoint creation with proper entity relationships
+    public async Task CreateTransactionCheckpointAsync(
+        long userId,
+        long fanId,
+        string transactionId,
+        DateTimeOffset transactionDate)
+    {
+        var checkpoint = new TransactionCheckpoint
+        {
+            UserId = userId,
+            FanId = fanId,
+            TransactionId = transactionId,
+            TransactionDate = transactionDate,
+            CreatedAt = DateTimeOffset.UtcNow,
+            ModifiedAt = DateTimeOffset.UtcNow
+        };
+
+        _dbContext.TransactionCheckpoints.Add(checkpoint);
+        await _dbContext.SaveChangesAsync();
+
+        // Cache with intelligent TTL
+        var cacheKey = $"transaction_checkpoints:{userId}:{fanId}:{transactionId}";
+        await _fusionCache.SetAsync(cacheKey, true, TimeSpan.FromHours(6));
+    }
+}
+```## Content-Based Change Detection
 
 ### The Hash-Based Checkpoint Pattern
 
@@ -839,6 +953,5 @@ The WebSocket layer handles live events as they happen, while HTTP mining fills 
 
 *How do you handle fault tolerance in your distributed systems? Have you implemented similar checkpoint patterns? Share your experiences with resumable operations in the comments below.*
 
-**Previous**: [<- Part 4 - Processing & Transformation](./part-4.md)
-
-**Next**: [Part 6 - Dual HTTP/WebSocket Strategy ->](./part-6.md)
+**Previous**: [� Part 4 - Processing & Transformation](./part-4.md)
+**Next**: [Part 6 - Dual HTTP/WebSocket Strategy �](./part-6.md)

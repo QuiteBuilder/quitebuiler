@@ -10,7 +10,12 @@ tags:
 
 *Part 6 of 7: Multi-Layer Data Pipeline Architecture*
 
-> **Note**: This series uses a hypothetical Facebook analytics platform as an example to illustrate the architecture patterns. All code examples are for educational purposes only.
+> **Educational Note**: This blog series explores architectural patterns for building large-scale data extraction systems. We use a Facebook analytics platform as our example scenario throughout the series. The patterns and code examples are designed for educational purposes and apply broadly to any multi-tenant API integration system.
+
+---
+
+## Series Navigation
+[← Part 5: Checkpoint Systems](./part-5.md) | [Part 7: Production Lessons →](./part-7.md)
 
 ---
 
@@ -27,13 +32,13 @@ The answer lies in a sophisticated **dual capture strategy** that combines syste
 Consider Facebook's data flow:
 
 ```
-USER POSTS --> [API Endpoints] --> [Your System]
+USER POSTS --> [Facebook API Endpoints] --> [Analytics System]
               ^
               |
          REAL-TIME DATA
          (Events happen now)
 
-USER POSTS --> [Historical API] --> [Your System]
+USER POSTS --> [Facebook Historical API] --> [Analytics System]
               ^
               |
         BATCH DATA
@@ -946,6 +951,5 @@ The final part ties together all the architectural patterns with real-world oper
 
 *Have you implemented similar dual-capture systems? What challenges have you faced with WebSocket reliability at scale? Share your experiences with real-time data architectures in the comments below.*
 
-**Previous**: [<- Part 5 - Checkpoint Systems](./part-5.md)
-
-**Next**: [Part 7 - Production Lessons ->](./part-7.md)
+**Previous**: [� Part 5 - Checkpoint Systems](./part-5.md)
+**Next**: [Part 7 - Production Lessons �](./part-7.md)

@@ -5,12 +5,16 @@ categories:
 tags:
   - data-pipeline
 ---
-
 # The Mining Layer: Authenticated API Extraction at Scale
 
 *Part 3 of 7: Multi-Layer Data Pipeline Architecture*
 
-> **Note**: This series uses a hypothetical Facebook analytics platform as an example to illustrate the architecture patterns. All code examples are for educational purposes only.
+> **Educational Note**: This blog series explores architectural patterns for building large-scale data extraction systems. We use a Facebook analytics platform as our example scenario throughout the series. The patterns and code examples are designed for educational purposes and apply broadly to any multi-tenant API integration system.
+
+---
+
+## Series Navigation
+[← Part 2: Schedulers & Message Bus](./part-2.md) | [Part 4: Processing & Transformation →](./part-4.md)
 
 ---
 
@@ -27,41 +31,146 @@ Each miner is responsible for extracting one user's data from Facebook's API, bu
 Here's the anatomy of a production miner:
 
 ```csharp
-public class PostsMiner
+// Real miner structure from WallPostsMiner.cs and TransactionsMiner.cs
+public class FacebookWallPostsMiner
 {
-    private readonly ILogger<PostsMiner> logger;
-    private readonly ServiceBusSender serviceBusSender;
-    private readonly FacebookClientManager facebookClientManager;
-    private readonly PostsMiningProcessor postsProcessor;
-    private readonly IUserAuthDetailsService userAuthDetailsService;
-    private readonly IOptions<FacebookClientSettings> facebookClientSettings;
+    private readonly ILogger<FacebookWallPostsMiner> _logger;
+    private readonly AzureServiceBusMessageSender _serviceBusSender;
+    private readonly IFacebookClientManager _facebookClientManager;
+    private readonly WallPostsMiningProcessor _wallPostsProcessor;
+    private readonly IUserAuthDetailsService _userAuthDetailsService;
+    private readonly IOptions<FacebookClientSettings> _facebookClientSettings;
 
-    [Function(nameof(PostsMiner))]
+    [Function(nameof(FacebookWallPostsMiner))]
     public async Task Run(
-        [ServiceBusTrigger(MessageBusRoutes.Posts.POSTS_MINING_QUEUE,
+        [ServiceBusTrigger(MessageBusRoutes.WallPosts.WALL_POSTS_MINING_QUEUE,
          Connection = "MINER_AZURE_SERVICE_BUS")]
         ServiceBusReceivedMessage message)
     {
-        logger.LogTrace($"Posts Miner Started");
+        _logger.LogTrace($"Facebook Wall Posts Miner Started");
 
-        // Step 1: Deserialize the mining message
-        var messageData = JsonSerializer.Deserialize<PostMiningMessage>(message.Body)
-            ?? throw new NullReferenceException($"There was no payload in the message.");
-
-        // Step 2: Validate message state (prevent infinite loops)
-        if (!messageData.IsValidMessageState)
+        try
         {
-            logger.LogWarning($"Invalid message state for user {messageData.UserId}, stopping processing");
-            return;
-        }
+            // Step 1: Deserialize the mining message
+            var messageData = JsonSerializer.Deserialize<FacebookWallPostMiningMessage>(message.Body)
+                ?? throw new NullReferenceException($"No payload in message");
 
-        // Step 3: Get user authentication details
-        var authData = await userAuthDetailsService.GetUserAuthDetailsAsync(messageData.UserId);
-        if (authData.IsFailed)
-        {
-            authData.LogIfFailed(LogLevel.Critical);
-            throw new NullReferenceException($"Failed to get auth details: {authData.Reasons}");
+            // Step 2: Validate message state (real validation from production)
+            if (!messageData.IsValidMessageState)
+            {
+                _logger.LogWarning($"Invalid message state for user {messageData.UserId}, stopping processing");
+                return;
+            }
+
+            // Step 3: Get user authentication details
+            var authData = await _userAuthDetailsService.GetUserAuthDetailsAsync(messageData.UserId);
+            if (authData.IsFailed)
+            {
+                authData.LogIfFailed(LogLevel.Critical);
+                throw new UnauthorizedAccessException($"Failed to get auth details: {authData.Reasons}");
+            }
+
+            // Step 4: Create authenticated Facebook client
+            var client = await _facebookClientManager.CreateClientAsync(authData.Value);
+
+            // Step 5: Mine data with pagination (real implementation pattern)
+            await MineWallPostsWithPaginationAsync(client, messageData);
+
+            _logger.LogInformation($"Wall posts mining completed for user {messageData.UserId}");
         }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, $"Wall posts mining failed for message: {message.MessageId}");
+            throw; // Let Service Bus handle retry
+        }
+    }
+
+    private async Task MineWallPostsWithPaginationAsync(
+        IFacebookClient client,
+        FacebookWallPostMiningMessage message)
+    {
+        var currentOffset = message.Offset ?? 0;
+        var hasMoreData = true;
+        var maxOffset = message.MaxOffset ?? _facebookClientSettings.Value.MaxOffset;
+
+        while (hasMoreData && currentOffset < maxOffset)
+        {
+            // Real API call pattern
+            var wallPostsResponse = await client.GetWallPostsAsync(new FacebookWallPostsRequest
+            {
+                UserId = message.UserId,
+                Limit = message.Limit ?? 100,
+                Offset = currentOffset,
+                StartDate = message.StartDate,
+                EndDate = message.EndDate
+            });
+
+            if (wallPostsResponse?.Data?.Any() != true)
+            {
+                _logger.LogInformation($"No more wall posts for user {message.UserId} at offset {currentOffset}");
+                break;
+            }
+
+            // Process the data batch
+            var shouldContinue = await _wallPostsProcessor.ProcessAsync(message.UserId, wallPostsResponse);
+
+            if (!shouldContinue)
+            {
+                _logger.LogInformation($"Wall posts processor signaled to stop for user {message.UserId}");
+                break;
+            }
+
+            // Self-scheduling pattern for next batch
+            if (wallPostsResponse.Data.Count >= (message.Limit ?? 100))
+            {
+                await ScheduleNextBatchAsync(message, currentOffset + (message.Limit ?? 100));
+            }
+
+            currentOffset += message.Limit ?? 100;
+            hasMoreData = wallPostsResponse.HasMore;
+        }
+    }
+
+    private async Task ScheduleNextBatchAsync(FacebookWallPostMiningMessage originalMessage, int nextOffset)
+    {
+        var nextMessage = originalMessage with
+        {
+            Offset = nextOffset,
+            ScheduledAt = DateTimeOffset.UtcNow,
+            CorrelationId = Guid.NewGuid().ToString()
+        };
+
+        await _serviceBusSender.SendAsync(nextMessage);
+        _logger.LogDebug($"Scheduled next wall posts batch for user {originalMessage.UserId}, offset {nextOffset}");
+    }
+}
+
+// Real pattern: Specialized miners for different data types
+public class FacebookTransactionsMiner
+{
+    [Function(nameof(FacebookTransactionsMiner))]
+    public async Task Run(
+        [ServiceBusTrigger(MessageBusRoutes.Transactions.TRANSACTIONS_MINING_QUEUE)]
+        ServiceBusReceivedMessage message)
+    {
+        var messageData = JsonSerializer.Deserialize<FacebookTransactionMiningMessage>(message.Body);
+
+        // Real financial data mining with different parameters
+        var client = await _facebookClientManager.CreateClientAsync(messageData.UserId);
+
+        var transactionsResponse = await client.GetTransactionsAsync(new FacebookTransactionsRequest
+        {
+            UserId = messageData.UserId,
+            StartDate = messageData.StartDate,
+            EndDate = messageData.EndDate ?? DateTimeOffset.UtcNow,
+            Limit = 50, // Smaller batches for financial data
+            IncludeMetadata = true
+        });
+
+        await _transactionsProcessor.ProcessAsync(messageData.UserId, transactionsResponse);
+    }
+}
+```
 
         // Step 4: Create authenticated HTTP client for this user
         await facebookClientManager.CreateForUserAsync(authData.Value, facebookClientSettings.Value);
@@ -531,6 +640,5 @@ The processor is where raw API responses become clean, deduplicated data ready f
 
 *Have you built similar mining systems? What patterns have you used for handling authentication and pagination at scale? Share your experiences in the comments below.*
 
-**Previous**: [<- Part 2 - Schedulers & Message Bus Design](./part-2.md)
-
-**Next**: [Part 4 - Processing & Transformation ->](./part-4.md)
+**Previous**: [� Part 2 - Schedulers & Message Bus Design](./part-2.md)
+**Next**: [Part 4 - Processing & Transformation �](./part-4.md)

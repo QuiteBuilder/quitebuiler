@@ -6,12 +6,16 @@ tags:
   - architecture
   - pattern
 ---
-
 # Processing & Transformation: The Intelligence Layer
 
 *Part 4 of 7: Multi-Layer Data Pipeline Architecture*
 
-> **Note**: This series uses a hypothetical Facebook analytics platform as an example to illustrate the architecture patterns. All code examples are for educational purposes only.
+> **Educational Note**: This blog series explores architectural patterns for building large-scale data extraction systems. We use a Facebook analytics platform as our example scenario throughout the series. The patterns and code examples are designed for educational purposes and apply broadly to any multi-tenant API integration system.
+
+---
+
+## Series Navigation
+[← Part 3: The Mining Layer](./part-3.md) | [Part 5: Checkpoint Systems →](./part-5.md)
 
 ---
 
@@ -595,5 +599,4 @@ The checkpoint system is what transforms a fragile data pipeline into a producti
 *Have you implemented similar processing patterns? What deduplication strategies have worked best for your use cases? Share your experiences in the comments below.*
 
 **Previous**: [← Part 3 - The Mining Layer](./part-3.md)
-
 **Next**: [Part 5 - Checkpoint Systems →](./part-5.md)

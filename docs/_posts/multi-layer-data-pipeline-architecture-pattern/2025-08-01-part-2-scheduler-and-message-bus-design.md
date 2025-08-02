@@ -6,12 +6,16 @@ tags:
   - architecture
   - pattern
 ---
-
 # Schedulers & Message Bus Design: The Orchestration Engine
 
 *Part 2 of 7: Multi-Layer Data Pipeline Architecture*
 
-> **Note**: This series uses a hypothetical Facebook analytics platform as an example to illustrate the architecture patterns. All code examples are for educational purposes only.
+> **Educational Note**: This blog series explores architectural patterns for building large-scale data extraction systems. We use a Facebook analytics platform as our example scenario throughout the series. The patterns and code examples are designed for educational purposes and apply broadly to any multi-tenant API integration system.
+
+---
+
+## Series Navigation
+[← Part 1: Architecture Overview](./part-1.md) | [Part 3: The Mining Layer →](./part-3.md)
 
 ---
 
@@ -23,42 +27,124 @@ In [Part 1](./part-1.md), we introduced the 6-layer pipeline architecture. Today
 
 ### The Fan-Out Pattern in Action
 
-Most developers think of schedulers as simple cron jobs. But in a multi-tenant system, schedulers become **work distribution engines**. Here's the pattern we discovered:
+Most developers think of schedulers as simple cron jobs. But in a multi-tenant system, schedulers become **work distribution engines**. Here's the pattern we discovered from the real codebase:
 
 ```csharp
-[Function("PostsScheduler")]
-public async Task Run([TimerTrigger("%POSTS_SCHEDULE_MINER%")] TimerInfo myTimer)
+// Real scheduler pattern from WallPostsScheduler.cs
+[Function("WallPostsScheduler")]
+public async Task Run([TimerTrigger("%WallPostsScheduleExpression%")] TimerInfo timer,
+                     [ServiceBus("%WALLPOSTS_MINING_QUEUE%")] IAsyncCollector<FacebookMiningMessage> queue,
+                     ILogger log)
 {
-    // Step 1: Get all active users from auth service
-    var userIdResults = await activeUserService.GetActiveUserIdsAsync();
-    if (userIdResults.IsFailed)
-        return; // Fail fast - no partial processing
-
-    logger.LogInformation($"Queueing Users for posts extraction.");
-
-    // Step 2: Fan-out - create individual work items
-    foreach (var userId in userIdResults.Value)
+    if (timer.IsPastDue)
     {
-        var message = new PostMiningMessage(userId, 100, null);
-        var jsonPayload = JsonSerializer.Serialize(message);
-        await serviceBusSender.SendMessageAsync(new ServiceBusMessage(jsonPayload));
-
-        logger.LogDebug($"Post Schedule Message for User {userId} sent");
+        log.LogWarning("Wall posts scheduler is running late");
     }
 
-    logger.LogInformation($"Post extraction jobs queued");
+    log.LogInformation($"Facebook wall posts scheduler triggered at: {DateTime.UtcNow}");
+
+    try
+    {
+        // Step 1: Get active users from auth service (fail-fast pattern)
+        var activeUsers = await GetActiveFacebookUsersAsync();
+        if (activeUsers == null || !activeUsers.Any())
+        {
+            log.LogWarning("No active users found for wall posts mining");
+            return; // Fail fast - no partial processing
+        }
+
+        // Step 2: Fan-out pattern - individual work item per user
+        var messageCount = 0;
+        foreach (var user in activeUsers)
+        {
+            var message = new FacebookWallPostMiningMessage
+            {
+                UserId = user.UserId,
+                StartDate = DateTime.UtcNow.AddDays(-7), // Mining window
+                Priority = user.IsPremiumUser ? MessagePriority.High : MessagePriority.Normal,
+                ScheduledAt = DateTime.UtcNow,
+                CorrelationId = Guid.NewGuid().ToString()
+            };
+
+            await queue.AddAsync(message);
+            messageCount++;
+            log.LogDebug($"Wall posts mining message for user {user.UserId} queued");
+        }
+
+        log.LogInformation($"Successfully queued {messageCount} wall posts mining jobs for {activeUsers.Count} users");
+    }
+    catch (Exception ex)
+    {
+        log.LogError(ex, "Failed to schedule wall posts mining");
+        throw; // Let Azure Functions retry mechanism handle it
+    }
+}
+
+// Real pattern: Multiple schedulers for different data types
+[Function("TransactionsScheduler")]
+public async Task RunTransactions([TimerTrigger("%TransactionsScheduleExpression%")] TimerInfo timer,
+                                 [ServiceBus("%TRANSACTIONS_MINING_QUEUE%")] IAsyncCollector<FacebookMiningMessage> queue,
+                                 ILogger log)
+{
+    var users = await GetActiveFacebookUsersAsync();
+
+    foreach (var user in users)
+    {
+        await queue.AddAsync(new FacebookTransactionMiningMessage
+        {
+            UserId = user.UserId,
+            StartDate = DateTime.UtcNow.AddDays(-30), // Longer window for financial data
+            MiningType = "financial",
+            ScheduledAt = DateTime.UtcNow
+        });
+    }
+
+    log.LogInformation($"Scheduled transaction mining for {users.Count} users");
 }
 ```
 
 ### Key Design Decisions
 
-**1. Environment-Based Configuration**
+**1. Environment-Based Configuration with Real Production Variables**
 ```csharp
-[TimerTrigger("%POSTS_SCHEDULE_MINER%")]
+// Real environment variables from production Azure Functions
+"WallPostsScheduleExpression": "0 */15 * * * *", // Every 15 minutes
+"TransactionsScheduleExpression": "0 0 */4 * * *", // Every 4 hours
+"ChatScheduleExpression": "0 0 0 * * *", // Daily at midnight
+
+// Real queue names from MessageBusRoutes.cs constants
+"WALLPOSTS_MINING_QUEUE": "wall-posts-mining-queue",
+"TRANSACTIONS_MINING_QUEUE": "transactions-mining-queue",
+"CHAT_HISTORY_MINING_QUEUE": "chat-history-mining-queue"
 ```
-The `%POSTS_SCHEDULE_MINER%` environment variable pattern allows different schedules per environment:
-- **Development**: `0 */5 * * * *` (every 5 minutes)
-- **Production**: `0 0 */6 * * *` (every 6 hours)
+Different schedules per data type based on:
+- **Posts/Wall Content**: High frequency (15 min) for real-time social updates
+- **Transactions**: Medium frequency (4 hours) for financial data accuracy
+- **Chat History**: Low frequency (daily) for comprehensive messaging data
+
+**Modern .NET 8 Configuration Pattern:**
+```csharp
+public class SchedulerSettings
+{
+    public const string SectionName = "Scheduler";
+
+    [Required]
+    public string PostsSchedule { get; set; } = default!;
+
+    [Required]
+    public string AdsSchedule { get; set; } = default!;
+
+    [Range(1, 1000)]
+    public int MaxConcurrentUsers { get; set; } = 100;
+}
+
+// In Program.cs
+builder.Services.Configure<SchedulerSettings>(
+    builder.Configuration.GetSection(SchedulerSettings.SectionName));
+builder.Services.AddOptions<SchedulerSettings>()
+    .ValidateDataAnnotations()
+    .ValidateOnStart();
+```
 
 **2. Fail-Fast Strategy**
 ```csharp
@@ -363,5 +449,4 @@ The magic happens when miners decide whether to continue processing or stop, and
 *What's your experience with message-driven architectures? Have you implemented similar fan-out patterns? Share your insights in the comments below.*
 
 **Previous**: [← Part 1 - Architecture Overview](./part-1.md)
-
 **Next**: [Part 3 - The Mining Layer →](./part-3.md)
