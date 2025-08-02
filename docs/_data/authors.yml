@@ -1,0 +1,13 @@
+# Authors
+
+QuiteBuilder:
+  name        : "QuiteBuilder"
+  bio         : "A builder of quite things."
+  avatar      : "/assets/images/bio-photo-2.jpg"
+  links:
+    - label: "Email"
+      icon: "fas fa-fw fa-envelope-square"
+      url: "mailto:quitebuilder@gmail.com"
+    - label: "Website"
+      icon: "fas fa-fw fa-link"
+      url: "https://quitebuilder.github.io"

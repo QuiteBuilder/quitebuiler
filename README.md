@@ -1,2 +1,1 @@
-# quitebuiler
-Quite Builder Blog
+# Quite Builder Blog
